@@ -7,15 +7,8 @@ import { RunResultsTable } from "./components/RunResultsTable";
 import { createRun, getRun, listRuns, parsePayload } from "./api";
 import type { RunDetail, RunMeta } from "./types";
 
-// const samplePayload = `{
-//   "enrollmentID": 644,
-//   "accessCode": "MOSSADAMSP",
-//   "vnetClientID": "977929180",
-//   "supplierName": "ExampleVendor",
-//   "addresses": [{"type":"primary","city":"Fake City"}],
-//   "contacts": [{"email":"test@example.com"}],
-//   "createCaseMode": "ignore_duplicate"
-// }`;
+const samplePayload = `{
+}`;
 
 export default function App() {
   const [tab, setTab] = useState<"new" | "history">("new");
@@ -32,7 +25,7 @@ export default function App() {
   const [notes, setNotes] = useState("");
 
   // Payload input
-  // const [payloadText, setPayloadText] = useState(samplePayload);
+  const [payloadText, setPayloadText] = useState(samplePayload);
   const [payloadType, setPayloadType] = useState<string>("");
 
   // Fields
