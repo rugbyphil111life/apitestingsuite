@@ -251,10 +251,23 @@ def create_run(req: RunRequest):
     return RunCreateResponse(runId=run_id)
 
 
-@app.get("/api/runs", response_model=List[RunMeta])
+@app.get("/api/runs")
 def runs():
     rows = list_runs(conn, limit=200)
-    return rows
+    out = []
+    for r in rows:
+        # r might be dict already (your db.py returns dict rows)
+        created = r.get("created_at_utc") or r.get("created_at") or r.get("createdAtUtc") or r.get("createdAt")
+        out.append({
+            "id": r.get("id"),
+            "created_at_utc": created,
+            "endpoint": r.get("endpoint"),
+            "method": r.get("method"),
+            "payload_type": r.get("payload_type") or r.get("payloadType"),
+            "payload_hash": r.get("payload_hash") or r.get("payloadHash"),
+            "notes": r.get("notes") or "",
+        })
+    return out
 
 
 @app.get("/api/runs/{run_id}", response_model=RunDetail)
