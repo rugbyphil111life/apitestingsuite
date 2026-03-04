@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from auth import AuthError, build_auth_headers
 from db import connect, init_db, insert_run, insert_results, list_runs, get_run, get_results
 from runner import (
     DEFAULT_MISSING_REQUIRED_REGEX,
@@ -23,7 +24,6 @@ app = FastAPI(title="Field Tester API", version="0.1.0")
 # CORS: set ALLOWED_ORIGINS as comma-separated list in Render env
 allowed = os.getenv("ALLOWED_ORIGINS", "*")
 allow_origins = [o.strip() for o in allowed.split(",")] if allowed != "*" else ["*"]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
@@ -39,13 +39,27 @@ init_db(conn)
 class ParseRequest(BaseModel):
     payloadText: str
     payloadType: Optional[str] = None  # json|xml|csv|unknown
-    csvSendMode: str = "csv_as_json"   # csv_as_json|raw_csv
+    csvSendMode: str = "csv_as_json"  # csv_as_json|raw_csv
     includeContainers: bool = True
 
 
 class ParseResponse(BaseModel):
     detectedType: str
     paths: List[str]
+
+
+class OAuth2ClientCredentials(BaseModel):
+    tokenUrl: str
+    clientId: str
+    clientSecret: str
+    scope: Optional[str] = None
+    audience: Optional[str] = None
+
+
+class AuthConfig(BaseModel):
+    type: str = "none"  # none|bearer|oauth2_client_credentials
+    bearerToken: Optional[str] = None
+    oauth2: Optional[OAuth2ClientCredentials] = None
 
 
 class RunRequest(BaseModel):
@@ -59,11 +73,13 @@ class RunRequest(BaseModel):
     includeContainers: bool = True
 
     protectedPaths: List[str] = Field(default_factory=list)
-
     timeoutSeconds: int = 25
     missingRequiredRegex: str = DEFAULT_MISSING_REQUIRED_REGEX
     contentTypeOverride: Optional[str] = None
     notes: str = ""
+
+    # NEW:
+    auth: Optional[AuthConfig] = None
 
 
 class RunCreateResponse(BaseModel):
@@ -133,7 +149,17 @@ def create_run(req: RunRequest):
     protected = set(req.protectedPaths or [])
     targets = [p for p in all_paths if p not in protected]
 
-    # store run metadata
+    # Build auth headers ONCE per run (not per omitted field)
+    try:
+        auth_headers = build_auth_headers(req.auth.dict() if req.auth else None)
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Merge headers: user headers + auth headers (auth wins)
+    base_headers = dict(req.headers or {})
+    base_headers.update(auth_headers)
+
+    # store run metadata (NOTE: auth is NOT persisted)
     run_id = insert_run(
         conn,
         endpoint=req.endpointUrl.strip(),
@@ -157,7 +183,7 @@ def create_run(req: RunRequest):
             r = run_omit_one(
                 endpoint=req.endpointUrl.strip(),
                 method=req.method.strip().upper(),
-                headers=req.headers or {},
+                headers=base_headers,
                 payload_type=ptype,
                 base_obj=parsed,
                 raw_csv=raw_csv,
@@ -186,7 +212,7 @@ def create_run(req: RunRequest):
 @app.get("/api/runs", response_model=List[RunMeta])
 def runs():
     rows = list_runs(conn, limit=200)
-    return rows  # compatible fields
+    return rows
 
 
 @app.get("/api/runs/{run_id}", response_model=RunDetail)
