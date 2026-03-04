@@ -1,4 +1,3 @@
-import json
 import os
 from typing import Any, Dict, List, Optional
 
@@ -7,16 +6,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from auth import AuthError, build_auth_headers
-from db import connect, init_db, insert_run, insert_results, list_runs, get_run, get_results
+from db import (
+    connect,
+    get_results,
+    get_run,
+    init_db,
+    insert_results,
+    insert_run,
+    list_runs,
+)
 from runner import (
     DEFAULT_MISSING_REQUIRED_REGEX,
     detect_payload_type,
-    parse_payload,
-    sha256_text,
+    extract_paths_csv,
     extract_paths_json,
     extract_paths_xml,
-    extract_paths_csv,
+    parse_payload,
     run_omit_one,
+    sha256_text,
 )
 
 app = FastAPI(title="Field Tester API", version="0.1.0")
@@ -24,6 +31,7 @@ app = FastAPI(title="Field Tester API", version="0.1.0")
 # CORS: set ALLOWED_ORIGINS as comma-separated list in Render env
 allowed = os.getenv("ALLOWED_ORIGINS", "*")
 allow_origins = [o.strip() for o in allowed.split(",")] if allowed != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
@@ -36,6 +44,9 @@ conn = connect()
 init_db(conn)
 
 
+# ----------------------------
+# Models
+# ----------------------------
 class ParseRequest(BaseModel):
     payloadText: str
     payloadType: Optional[str] = None  # json|xml|csv|unknown
@@ -57,7 +68,8 @@ class OAuth2ClientCredentials(BaseModel):
 
 
 class AuthConfig(BaseModel):
-    type: str = "none"  # none|bearer|oauth2_client_credentials
+    # "none" | "bearer" | "oauth2_client_credentials"
+    type: str = "none"
     bearerToken: Optional[str] = None
     oauth2: Optional[OAuth2ClientCredentials] = None
 
@@ -78,7 +90,7 @@ class RunRequest(BaseModel):
     contentTypeOverride: Optional[str] = None
     notes: str = ""
 
-    # NEW:
+    # NEW: auth config (NOT persisted)
     auth: Optional[AuthConfig] = None
 
 
@@ -101,6 +113,24 @@ class RunDetail(BaseModel):
     results: List[Dict[str, Any]]
 
 
+# ----------------------------
+# Helpers
+# ----------------------------
+def _strip_auth_from_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """
+    Prevent accidental persistence of secrets if user puts Authorization in headers box.
+    """
+    cleaned: Dict[str, str] = {}
+    for k, v in (headers or {}).items():
+        if k.lower() == "authorization":
+            continue
+        cleaned[k] = v
+    return cleaned
+
+
+# ----------------------------
+# Routes
+# ----------------------------
 @app.get("/api/health")
 def health():
     return {"ok": True}
@@ -110,8 +140,12 @@ def health():
 def parse(req: ParseRequest):
     payload_text = req.payloadText or ""
     ptype = req.payloadType or detect_payload_type(payload_text)
+
     if ptype == "unknown":
-        raise HTTPException(status_code=400, detail="Could not detect payload type (provide valid JSON/XML/CSV).")
+        raise HTTPException(
+            status_code=400,
+            detail="Could not detect payload type (provide valid JSON/XML/CSV).",
+        )
 
     parsed, raw_csv = parse_payload(payload_text, ptype, req.csvSendMode)
 
@@ -131,8 +165,12 @@ def parse(req: ParseRequest):
 def create_run(req: RunRequest):
     payload_text = req.payloadText or ""
     ptype = req.payloadType or detect_payload_type(payload_text)
+
     if ptype == "unknown":
-        raise HTTPException(status_code=400, detail="Could not detect payload type (provide valid JSON/XML/CSV).")
+        raise HTTPException(
+            status_code=400,
+            detail="Could not detect payload type (provide valid JSON/XML/CSV).",
+        )
 
     parsed, raw_csv = parse_payload(payload_text, ptype, req.csvSendMode)
 
@@ -155,18 +193,21 @@ def create_run(req: RunRequest):
     except AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Merge headers: user headers + auth headers (auth wins)
-    base_headers = dict(req.headers or {})
-    base_headers.update(auth_headers)
+    # Merge outbound headers: user headers + auth headers (auth wins)
+    outbound_headers = dict(req.headers or {})
+    outbound_headers.update(auth_headers)
 
-    # store run metadata (NOTE: auth is NOT persisted)
+    # Persist headers WITHOUT Authorization to avoid storing secrets
+    persisted_headers = _strip_auth_from_headers(req.headers or {})
+
+    # store run metadata (auth is not persisted)
     run_id = insert_run(
         conn,
         endpoint=req.endpointUrl.strip(),
         method=req.method.strip().upper(),
         payload_type=ptype,
         payload_hash=sha256_text(payload_text),
-        headers=req.headers or {},
+        headers=persisted_headers,
         protected_paths=sorted(list(protected)),
         tested_paths=targets,
         include_containers=req.includeContainers,
@@ -183,13 +224,14 @@ def create_run(req: RunRequest):
             r = run_omit_one(
                 endpoint=req.endpointUrl.strip(),
                 method=req.method.strip().upper(),
-                headers=base_headers,
+                headers=outbound_headers,
                 payload_type=ptype,
                 base_obj=parsed,
                 raw_csv=raw_csv,
                 omit_path=path,
                 timeout_s=int(req.timeoutSeconds),
-                missing_required_regex=req.missingRequiredRegex or DEFAULT_MISSING_REQUIRED_REGEX,
+                missing_required_regex=req.missingRequiredRegex
+                or DEFAULT_MISSING_REQUIRED_REGEX,
                 csv_send_mode=req.csvSendMode,
                 force_content_type=req.contentTypeOverride,
             )
@@ -237,6 +279,7 @@ def export_json(run_id: int):
 def export_csv(run_id: int):
     import csv
     from io import StringIO
+
     from fastapi.responses import Response
 
     r = get_run(conn, run_id)
@@ -247,7 +290,15 @@ def export_csv(run_id: int):
     buf = StringIO()
     w = csv.DictWriter(
         buf,
-        fieldnames=["omitted_path", "removed", "status_code", "classification", "why", "response_snippet", "elapsed_ms"],
+        fieldnames=[
+            "omitted_path",
+            "removed",
+            "status_code",
+            "classification",
+            "why",
+            "response_snippet",
+            "elapsed_ms",
+        ],
     )
     w.writeheader()
     for row in res:
