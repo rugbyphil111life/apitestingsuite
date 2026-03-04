@@ -1,23 +1,27 @@
 import React, { useMemo, useState } from "react";
 import type { RunResultRow } from "../types";
 
-export function RunResultsTable(props: { rows: RunResultRow[]; runId?: number }) {
+export function RunResultsTable(props: { results: RunResultRow[]; runId?: number }) {
   const [q, setQ] = useState("");
   const [cls, setCls] = useState<string>("");
 
+  const rows = props.results ?? [];
+
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
-    return props.rows.filter((r) => {
-      const matchesQ = !s || r.omitted_path.toLowerCase().includes(s) || r.why.toLowerCase().includes(s);
+    return rows.filter((r) => {
+      const omitted = (r.omitted_path ?? "").toLowerCase();
+      const why = (r.why ?? "").toLowerCase();
+      const matchesQ = !s || omitted.includes(s) || why.includes(s);
       const matchesC = !cls || r.classification === cls;
       return matchesQ && matchesC;
     });
-  }, [q, cls, props.rows]);
+  }, [q, cls, rows]);
 
   const classes = useMemo(() => {
-    const set = new Set(props.rows.map((r) => r.classification));
+    const set = new Set(rows.map((r) => r.classification).filter(Boolean));
     return Array.from(set).sort();
-  }, [props.rows]);
+  }, [rows]);
 
   return (
     <div className="space-y-3">
