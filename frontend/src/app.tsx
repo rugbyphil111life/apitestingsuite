@@ -1,524 +1,300 @@
-import React, { useEffect, useMemo, useState } from "react";
+// src/App.tsx
+import React, { useMemo, useState } from "react";
 import { Card } from "./components/Card";
 import { Button } from "./components/Button";
 import { CodeEditor } from "./components/CodeEditor";
 import { FieldPicker } from "./components/FieldPicker";
 import { RunResultsTable } from "./components/RunResultsTable";
 import { createRun, getRun, listRuns, parsePayload } from "./api";
-import type { RunDetail, RunMeta } from "./types";
+import type { AuthConfig, RunDetail, RunMeta } from "./types";
 
-type AuthType = "none" | "bearer" | "oauth2_client_credentials";
-
-type OAuth2ClientCredentials = {
-  tokenUrl: string;
-  clientId: string;
-  clientSecret: string;
-  scope?: string;
-  audience?: string;
-};
-
-type AuthConfig =
-  | { type: "none" }
-  | { type: "bearer"; bearerToken: string }
-  | { type: "oauth2_client_credentials"; oauth2: OAuth2ClientCredentials };
-
-const samplePayload = `{ }`;
-
-const inputClass =
-  "w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:ring-2 focus:ring-slate-500";
-const selectClass =
-  "w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-slate-500";
-const labelClass = "text-xs font-semibold text-slate-300";
-const helpClass = "text-xs text-slate-400";
+type PayloadType = "json" | "xml" | "csv";
+type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export default function App() {
-  const [tab, setTab] = useState<"new" | "history">("new");
+  const [targetUrl, setTargetUrl] = useState("");
+  const [method, setMethod] = useState<HttpMethod>("POST");
+  const [payloadType, setPayloadType] = useState<PayloadType>("json");
+  const [payloadText, setPayloadText] = useState("");
 
-  // Request config
-  const [endpointUrl, setEndpointUrl] = useState("");
-  const [method, setMethod] = useState("POST");
-  const [timeoutSeconds, setTimeoutSeconds] = useState(25);
-  const [headersText, setHeadersText] = useState(`{ "Content-Type": "application/json" }`);
-  const [contentTypeOverride, setContentTypeOverride] = useState("");
-  const [missingRegex, setMissingRegex] = useState("(required|missing|must not be null|cannot be null|is null)");
-  const [includeContainers, setIncludeContainers] = useState(true);
-  const [csvSendMode, setCsvSendMode] = useState<"csv_as_json" | "raw_csv">("csv_as_json");
-  const [notes, setNotes] = useState("");
+  const [auth, setAuth] = useState<AuthConfig>({ type: "none" });
 
-  // Auth config
-  const [authType, setAuthType] = useState<AuthType>("none");
-  const [bearerToken, setBearerToken] = useState("");
-  const [oauthTokenUrl, setOauthTokenUrl] = useState("");
-  const [oauthClientId, setOauthClientId] = useState("");
-  const [oauthClientSecret, setOauthClientSecret] = useState("");
-  const [oauthScope, setOauthScope] = useState("");
-  const [oauthAudience, setOauthAudience] = useState("");
+  const [discoveredFields, setDiscoveredFields] = useState<string[]>([]);
+  const [protectedFields, setProtectedFields] = useState<string[]>([]);
 
-  function buildAuth(): AuthConfig {
-    if (authType === "none") return { type: "none" };
-    if (authType === "bearer") return { type: "bearer", bearerToken };
-    return {
-      type: "oauth2_client_credentials",
-      oauth2: {
-        tokenUrl: oauthTokenUrl,
-        clientId: oauthClientId,
-        clientSecret: oauthClientSecret,
-        scope: oauthScope.trim() || undefined,
-        audience: oauthAudience.trim() || undefined,
-      },
-    };
-  }
-
-  // Payload input
-  const [payloadText, setPayloadText] = useState(samplePayload);
-  const [payloadType, setPayloadType] = useState("");
-
-  // Fields
-  const [allPaths, setAllPaths] = useState<string[]>([]);
-  const [protectedPaths, setProtectedPaths] = useState<Set<string>>(new Set());
-
-  // Runs / results
   const [runs, setRuns] = useState<RunMeta[]>([]);
-  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
-  const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
-  const [busy, setBusy] = useState("");
+  const [activeRun, setActiveRun] = useState<RunDetail | null>(null);
 
-  const testedCount = useMemo(
-    () => Math.max(0, allPaths.length - protectedPaths.size),
-    [allPaths, protectedPaths]
-  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  async function refreshRuns() {
-    const r = await listRuns();
-    setRuns(r);
-  }
+  const canDiscover = useMemo(() => payloadText.trim().length > 0, [payloadText]);
+  const canRun = useMemo(() => targetUrl.trim().length > 0, [targetUrl]);
 
-  useEffect(() => {
-    refreshRuns().catch(() => {});
-  }, []);
-
-  async function onUpload(file: File) {
-    const text = await file.text();
-    setPayloadText(text);
-  }
-
-  async function discoverFields() {
-    setBusy("Discovering fields…");
+  async function onRefreshRuns() {
+    setError(null);
     try {
-      const parsed = await parsePayload({
+      const data = await listRuns();
+      setRuns(data);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load runs");
+    }
+  }
+
+  async function onDiscoverFields() {
+    setBusy(true);
+    setError(null);
+    try {
+      const resp = await parsePayload({
         payloadText,
-        payloadType: payloadType || undefined,
-        csvSendMode,
-        includeContainers,
+        payloadType,
+        auth,
       });
-      setAllPaths(parsed.paths);
-      setProtectedPaths(new Set());
+      const fields = resp.fields || [];
+      setDiscoveredFields(fields);
+      // keep protectedFields stable; user chooses
+    } catch (e: any) {
+      setError(e?.message || "Discover fields failed");
     } finally {
-      setBusy("");
+      setBusy(false);
     }
   }
 
-  function parseHeaders(): Record<string, string> {
-    const obj = JSON.parse(headersText || "{}");
-    if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
-    throw new Error("Headers must be a JSON object");
-  }
-
-  async function runSuite() {
-    if (!endpointUrl.trim()) throw new Error("Endpoint URL required");
-
-    if (authType === "bearer" && !bearerToken.trim()) {
-      throw new Error("Bearer token is empty");
-    }
-    if (authType === "oauth2_client_credentials") {
-      if (!oauthTokenUrl.trim()) throw new Error("OAuth tokenUrl is required");
-      if (!oauthClientId.trim()) throw new Error("OAuth clientId is required");
-      if (!oauthClientSecret.trim()) throw new Error("OAuth clientSecret is required");
-    }
-
-    setBusy("Running omit-one-field suite…");
+  async function onCreateRun() {
+    setBusy(true);
+    setError(null);
     try {
-      const req = {
-        endpointUrl,
+      const resp = await createRun({
+        targetUrl,
         method,
-        headers: parseHeaders(),
-        payloadText,
-        payloadType: payloadType || undefined,
-        csvSendMode,
-        includeContainers,
-        protectedPaths: Array.from(protectedPaths),
-        timeoutSeconds,
-        missingRequiredRegex: missingRegex,
-        contentTypeOverride: contentTypeOverride.trim() || undefined,
-        notes,
-        auth: buildAuth(),
-      };
+        payloadText: payloadText.trim().length ? payloadText : undefined,
+        payloadType: payloadText.trim().length ? payloadType : undefined,
+        protectedFields,
+        auth,
+      });
 
-      const { runId } = await createRun(req);
-      await refreshRuns();
-      setSelectedRunId(runId);
-
-      const detail = await getRun(runId);
-      setRunDetail(detail);
-      setTab("history");
+      const detail = await getRun(resp.id);
+      setActiveRun(detail);
+      await onRefreshRuns();
+    } catch (e: any) {
+      setError(e?.message || "Run failed");
     } finally {
-      setBusy("");
-    }
-  }
-
-  async function loadRun(runId: number) {
-    setBusy("Loading run…");
-    try {
-      setSelectedRunId(runId);
-      const detail = await getRun(runId);
-      setRunDetail(detail);
-    } finally {
-      setBusy("");
+      setBusy(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto max-w-7xl px-4 py-6 md:px-6 lg:px-8">
-        {/* Header */}
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold tracking-tight">Field Tester</h1>
-          <p className="text-sm text-slate-400">Omit-one-field runner + persistent results</p>
+    <div className="min-h-screen bg-black text-white">
+      <div className="mx-auto max-w-6xl px-4 py-8">
+        <div className="flex flex-col gap-2">
+          <div className="text-2xl font-bold tracking-tight">API Testing Suite</div>
+          <div className="text-sm text-white/60">
+            Parse payloads, protect fields, and run automated tests.
+          </div>
         </div>
 
-        {/* Tabs */}
-        <div className="mt-4 flex gap-2">
-          <Button onClick={() => setTab("new")} variant={tab === "new" ? "default" : "ghost"}>
-            New Run
-          </Button>
-          <Button onClick={() => setTab("history")} variant={tab === "history" ? "default" : "ghost"}>
-            History
-          </Button>
-        </div>
-
-        {/* Busy */}
-        {busy && (
-          <div className="mt-4">
-            <Card>
-              <div className="text-sm text-slate-200">{busy}</div>
-            </Card>
+        {error && (
+          <div className="mt-6 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            {error}
           </div>
         )}
 
-        {/* NEW RUN */}
-        {tab === "new" && (
-          <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {/* Left column */}
-            <Card>
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm">
-                  <span className="font-semibold">To test:</span>{" "}
-                  <span className="text-slate-200">{testedCount}</span>
+        <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <Card>
+            <div className="flex flex-col gap-4">
+              <div className="text-lg font-semibold">Request Setup</div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-xs text-white/60">Target URL</label>
+                  <input
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-white/20"
+                    placeholder="https://api.example.com/endpoint"
+                    value={targetUrl}
+                    onChange={(e) => setTargetUrl(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs text-white/60">Method</label>
+                  <select
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-white/20"
+                    value={method}
+                    onChange={(e) => setMethod(e.target.value as HttpMethod)}
+                  >
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                    <option value="PATCH">PATCH</option>
+                    <option value="DELETE">DELETE</option>
+                  </select>
                 </div>
               </div>
 
-              <div className="mt-4 space-y-4">
-                {/* Endpoint */}
-                <div className="space-y-2">
-                  <div className={labelClass}>Endpoint URL</div>
-                  <input
-                    className={inputClass}
-                    value={endpointUrl}
-                    onChange={(e) => setEndpointUrl(e.target.value)}
-                    placeholder="https://api.example.com/vendors"
-                  />
-                </div>
-
-                {/* Method + Timeout */}
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <div className={labelClass}>Method</div>
-                    <select className={selectClass} value={method} onChange={(e) => setMethod(e.target.value)}>
-                      <option>POST</option>
-                      <option>PUT</option>
-                      <option>PATCH</option>
-                    </select>
+              {/* Auth block */}
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-semibold">Authentication</div>
+                    <div className="text-xs text-white/60">
+                      Choose how outbound requests are authenticated.
+                    </div>
                   </div>
 
-                  <div className="space-y-2">
-                    <div className={labelClass}>Timeout (s)</div>
-                    <input
-                      className={inputClass}
-                      value={timeoutSeconds}
-                      onChange={(e) => setTimeoutSeconds(parseInt(e.target.value || "25", 10))}
-                      min={1}
-                      max={300}
-                      type="number"
-                    />
-                  </div>
+                  <select
+                    className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-white/20"
+                    value={auth.type}
+                    onChange={(e) => {
+                      const v = e.target.value as AuthConfig["type"];
+                      if (v === "none") setAuth({ type: "none" });
+                      if (v === "basic") setAuth({ type: "basic", username: "", password: "" });
+                      if (v === "bearer") setAuth({ type: "bearer", token: "" });
+                    }}
+                  >
+                    <option value="none">None</option>
+                    <option value="basic">Basic Auth (username/password)</option>
+                    <option value="bearer">Bearer Token</option>
+                  </select>
                 </div>
 
-                {/* Include containers */}
-                <label className="flex items-center gap-2 text-sm text-slate-200">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 rounded border-slate-700 bg-slate-950"
-                    checked={includeContainers}
-                    onChange={(e) => setIncludeContainers(e.target.checked)}
-                  />
-                  Include container nodes
-                </label>
-
-                {/* CSV mode + payload type */}
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <div className={labelClass}>CSV mode</div>
-                    <select
-                      className={selectClass}
-                      value={csvSendMode}
-                      onChange={(e) => setCsvSendMode(e.target.value as any)}
-                    >
-                      <option value="csv_as_json">csv_as_json</option>
-                      <option value="raw_csv">raw_csv</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className={labelClass}>Payload type (optional)</div>
-                    <input
-                      className={inputClass}
-                      value={payloadType}
-                      onChange={(e) => setPayloadType(e.target.value)}
-                      placeholder="json | xml | csv"
-                    />
-                    <div className={helpClass}>Leave blank to auto-detect.</div>
-                  </div>
-                </div>
-
-                {/* Content-Type override */}
-                <div className="space-y-2">
-                  <div className={labelClass}>Content-Type override</div>
-                  <input
-                    className={inputClass}
-                    value={contentTypeOverride}
-                    onChange={(e) => setContentTypeOverride(e.target.value)}
-                    placeholder="application/json"
-                  />
-                </div>
-
-                {/* Missing regex */}
-                <div className="space-y-2">
-                  <div className={labelClass}>Missing/required regex</div>
-                  <input
-                    className={inputClass}
-                    value={missingRegex}
-                    onChange={(e) => setMissingRegex(e.target.value)}
-                    placeholder="(required|missing|...)"
-                  />
-                </div>
-
-                {/* Notes */}
-                <div className="space-y-2">
-                  <div className={labelClass}>Notes</div>
-                  <input
-                    className={inputClass}
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    placeholder="Optional"
-                  />
-                </div>
-
-                {/* Headers */}
-                <div className="space-y-2">
-                  <div className={labelClass}>Headers (JSON)</div>
-                  <CodeEditor value={headersText} onChange={setHeadersText} heightClass="h-32" />
-                </div>
-
-                {/* Auth */}
-                <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-950/30 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-semibold text-slate-200">Authentication</div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className={labelClass}>Auth Type</div>
-                    <select
-                      className={selectClass}
-                      value={authType}
-                      onChange={(e) => setAuthType(e.target.value as AuthType)}
-                    >
-                      <option value="none">None</option>
-                      <option value="bearer">Bearer Token</option>
-                      <option value="oauth2_client_credentials">OAuth2 Client Credentials</option>
-                    </select>
-                  </div>
-
-                  {authType === "bearer" && (
-                    <div className="space-y-2">
-                      <div className={labelClass}>Bearer Token</div>
+                {auth.type === "basic" && (
+                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-xs text-white/60">Username</label>
                       <input
-                        className={inputClass}
-                        value={bearerToken}
-                        onChange={(e) => setBearerToken(e.target.value)}
-                        placeholder="eyJhbGciOi..."
+                        className="w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-white/20"
+                        value={auth.username}
+                        onChange={(e) => setAuth({ ...auth, username: e.target.value })}
+                        autoComplete="username"
                       />
                     </div>
-                  )}
-
-                  {authType === "oauth2_client_credentials" && (
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      <div className="space-y-2 md:col-span-2">
-                        <div className={labelClass}>Token URL</div>
-                        <input
-                          className={inputClass}
-                          value={oauthTokenUrl}
-                          onChange={(e) => setOauthTokenUrl(e.target.value)}
-                          placeholder="https://auth.example.com/oauth/token"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className={labelClass}>Client ID</div>
-                        <input
-                          className={inputClass}
-                          value={oauthClientId}
-                          onChange={(e) => setOauthClientId(e.target.value)}
-                          placeholder="client_id"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className={labelClass}>Client Secret</div>
-                        <input
-                          className={inputClass}
-                          type="password"
-                          value={oauthClientSecret}
-                          onChange={(e) => setOauthClientSecret(e.target.value)}
-                          placeholder="client_secret"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className={labelClass}>Scope (optional)</div>
-                        <input
-                          className={inputClass}
-                          value={oauthScope}
-                          onChange={(e) => setOauthScope(e.target.value)}
-                          placeholder="read write"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className={labelClass}>Audience (optional)</div>
-                        <input
-                          className={inputClass}
-                          value={oauthAudience}
-                          onChange={(e) => setOauthAudience(e.target.value)}
-                          placeholder="https://api.example.com/"
-                        />
-                      </div>
+                    <div>
+                      <label className="mb-1 block text-xs text-white/60">Password</label>
+                      <input
+                        className="w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-white/20"
+                        type="password"
+                        value={auth.password}
+                        onChange={(e) => setAuth({ ...auth, password: e.target.value })}
+                        autoComplete="current-password"
+                      />
                     </div>
-                  )}
+                    <div className="sm:col-span-2 text-xs text-white/50">
+                      Stored in memory only unless you add persistence.
+                    </div>
+                  </div>
+                )}
+
+                {auth.type === "bearer" && (
+                  <div className="mt-4">
+                    <label className="mb-1 block text-xs text-white/60">Bearer token</label>
+                    <input
+                      className="w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-white/20"
+                      value={auth.token}
+                      onChange={(e) => setAuth({ ...auth, token: e.target.value })}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label className="mb-1 block text-xs text-white/60">Payload Type</label>
+                  <select
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-white/20"
+                    value={payloadType}
+                    onChange={(e) => setPayloadType(e.target.value as PayloadType)}
+                  >
+                    <option value="json">JSON</option>
+                    <option value="xml">XML</option>
+                    <option value="csv">CSV</option>
+                  </select>
                 </div>
 
-                {/* Actions */}
-                <div className="flex flex-wrap gap-2 pt-2">
-                  <Button onClick={discoverFields}>Discover fields</Button>
-                  <Button onClick={runSuite}>Run suite</Button>
+                <div className="sm:col-span-2 flex items-end justify-end gap-2">
+                  <Button disabled={busy || !canDiscover} onClick={onDiscoverFields}>
+                    Discover Fields
+                  </Button>
+                  <Button disabled={busy || !canRun} onClick={onCreateRun}>
+                    Run Tests
+                  </Button>
                 </div>
               </div>
-            </Card>
 
-            {/* Right column */}
-            <Card>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <div className={labelClass}>Upload payload file</div>
-                  <div className={helpClass}>JSON / XML / CSV / TXT</div>
-                  <input
-                    className="block w-full text-sm text-slate-300 file:mr-4 file:rounded-xl file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-800"
-                    type="file"
-                    onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <div className={labelClass}>Payload</div>
-                  <CodeEditor value={payloadText} onChange={setPayloadText} heightClass="h-64" />
-                </div>
-
-                <div className="space-y-2">
-                  <div className={labelClass}>Protected fields</div>
-                  <FieldPicker paths={allPaths} protectedPaths={protectedPaths} onChange={setProtectedPaths} />
-                </div>
+              <div>
+                <label className="mb-1 block text-xs text-white/60">Payload</label>
+                <CodeEditor value={payloadText} onChange={setPayloadText} />
               </div>
-            </Card>
-          </div>
-        )}
+            </div>
+          </Card>
 
-        {/* HISTORY */}
-        {tab === "history" && (
-          <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Card>
+          <Card>
+            <div className="flex flex-col gap-4">
               <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-semibold text-slate-200">Runs</div>
-                <Button onClick={() => refreshRuns()} variant="ghost">
-                  Refresh
+                <div>
+                  <div className="text-lg font-semibold">Fields</div>
+                  <div className="text-xs text-white/60">
+                    Select protected fields (excluded from tests).
+                  </div>
+                </div>
+                <Button onClick={onRefreshRuns} disabled={busy}>
+                  Refresh Runs
                 </Button>
               </div>
 
-              <div className="mt-4 space-y-3">
-                {runs.length === 0 && <div className="text-sm text-slate-400">No runs yet.</div>}
+              <FieldPicker
+                fields={discoveredFields}
+                selected={protectedFields}
+                onChange={setProtectedFields}
+              />
 
-                {runs.map((r) => {
-                  const created = (r as any).created_at_utc ?? (r as any).created_at ?? null;
-                  const payloadHash = (r as any).payload_hash ?? (r as any).payloadHash ?? "";
-                  const payloadType = (r as any).payload_type ?? (r as any).payloadType ?? "";
-                  const method = (r as any).method ?? "";
-                  const endpoint = (r as any).endpoint ?? "";
-                  const notes = (r as any).notes ?? "";
-
-                  return (
-                    <div
-                      key={r.id}
-                      className={`rounded-2xl border border-slate-800 bg-slate-950/30 p-3 ${
-                        selectedRunId === r.id ? "ring-2 ring-slate-500" : ""
-                      }`}
-                    >
-                      <Button onClick={() => loadRun(r.id)} variant="ghost">
-                        #{r.id} — {created ? new Date(created).toLocaleString() : "(no date)"} — {method} {endpoint}
-                      </Button>
-                      <div className="mt-1 text-xs text-slate-400">
-                        {payloadType} • {payloadHash ? payloadHash.slice(0, 10) : "(no hash)"}…{" "}
-                        {notes ? `• ${notes}` : ""}
+              <div className="mt-2">
+                <div className="text-sm font-semibold">Recent Runs</div>
+                <div className="mt-2 rounded-2xl border border-white/10 bg-white/5">
+                  <div className="max-h-48 overflow-auto">
+                    {runs.length === 0 ? (
+                      <div className="p-4 text-sm text-white/60">No runs yet.</div>
+                    ) : (
+                      <div className="divide-y divide-white/10">
+                        {runs.map((r) => (
+                          <button
+                            key={r.id}
+                            className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-white/5"
+                            onClick={async () => {
+                              setBusy(true);
+                              setError(null);
+                              try {
+                                const d = await getRun(r.id);
+                                setActiveRun(d);
+                              } catch (e: any) {
+                                setError(e?.message || "Failed to load run");
+                              } finally {
+                                setBusy(false);
+                              }
+                            }}
+                          >
+                            <div className="text-sm">
+                              <div className="font-medium">{r.id}</div>
+                              <div className="text-xs text-white/60">{r.createdAt}</div>
+                            </div>
+                            <div className="text-xs text-white/60">{r.status}</div>
+                          </button>
+                        ))}
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </Card>
-
-            <Card>
-              {!runDetail && <div className="text-sm text-slate-400">Select a run to view results.</div>}
-              {runDetail && (
-                <div className="space-y-4">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-200">Run metadata</div>
-                    <pre className="mt-2 max-h-64 overflow-auto rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-200">
-                      {JSON.stringify(runDetail.run, null, 2)}
-                    </pre>
-                  </div>
-
-                  <div>
-                    <div className="text-sm font-semibold text-slate-200">Results</div>
-                    <div className="mt-2">
-                      <RunResultsTable results={runDetail.results} runId={selectedRunId ?? undefined} />
-                    </div>
+                    )}
                   </div>
                 </div>
-              )}
-            </Card>
-          </div>
-        )}
+              </div>
+            </div>
+          </Card>
+        </div>
 
-        {/* Footer */}
-        <div className="mt-6 text-xs text-slate-500">
-          API base: <code className="text-slate-300">{import.meta.env.VITE_API_BASE_URL || "(not set)"}</code>
+        <div className="mt-6">
+          <Card>
+            <div className="flex flex-col gap-3">
+              <div className="text-lg font-semibold">Results</div>
+              <RunResultsTable run={activeRun} />
+            </div>
+          </Card>
         </div>
       </div>
     </div>
