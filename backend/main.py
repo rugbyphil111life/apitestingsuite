@@ -7,7 +7,8 @@ from typing import Dict, Any, List
 
 import httpx
 
-from .schemas import (
+from backend.app.schemas.auth import AuthNone, AuthBasic, AuthBearer, AuthConfig
+from backend.app.schemas.runs import (
     ParseRequest,
     ParseResponse,
     CreateRunRequest,
@@ -15,7 +16,7 @@ from .schemas import (
     RunMeta,
     RunDetail,
 )
-from .http_utils import apply_auth
+from backend.app.services.http_utils import apply_auth
 
 app = FastAPI()
 
