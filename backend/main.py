@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 
 import httpx
 
-from backend.app.schemas.auth import AuthNone, AuthBasic, AuthBearer, AuthConfig
+from backend.app.schemas.auth import AuthConfig
 from backend.app.schemas.runs import (
     ParseRequest,
     ParseResponse,
