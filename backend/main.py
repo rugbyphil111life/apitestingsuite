@@ -1,320 +1,182 @@
-import os
-from typing import Any, Dict, List, Optional
-
+# app/main.py
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+import time
+import uuid
+from typing import Dict, Any, List
 
-from auth import AuthError, build_auth_headers
-from db import (
-    connect,
-    get_results,
-    get_run,
-    init_db,
-    insert_results,
-    insert_run,
-    list_runs,
+import httpx
+
+from .schemas import (
+    ParseRequest,
+    ParseResponse,
+    CreateRunRequest,
+    CreateRunResponse,
+    RunMeta,
+    RunDetail,
 )
-from runner import (
-    DEFAULT_MISSING_REQUIRED_REGEX,
-    detect_payload_type,
-    extract_paths_csv,
-    extract_paths_json,
-    extract_paths_xml,
-    parse_payload,
-    run_omit_one,
-    sha256_text,
-)
+from .http_utils import apply_auth
 
-app = FastAPI(title="Field Tester API", version="0.1.0")
+app = FastAPI()
 
-# CORS: set ALLOWED_ORIGINS as comma-separated list in Render env
-allowed = os.getenv("ALLOWED_ORIGINS", "*")
-allow_origins = [o.strip() for o in allowed.split(",")] if allowed != "*" else ["*"]
-
+# CORS - keep permissive for dev; tighten for prod
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins,
-    allow_credentials=False,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-conn = connect()
-init_db(conn)
+# In-memory store (drop-in). Replace with your persistence if needed.
+RUNS: Dict[str, RunDetail] = {}
 
 
-# ----------------------------
-# Models
-# ----------------------------
-class ParseRequest(BaseModel):
-    payloadText: str
-    payloadType: Optional[str] = None  # json|xml|csv|unknown
-    csvSendMode: str = "csv_as_json"  # csv_as_json|raw_csv
-    includeContainers: bool = True
-
-
-class ParseResponse(BaseModel):
-    detectedType: str
-    paths: List[str]
-
-
-class OAuth2ClientCredentials(BaseModel):
-    tokenUrl: str
-    clientId: str
-    clientSecret: str
-    scope: Optional[str] = None
-    audience: Optional[str] = None
-
-
-class AuthConfig(BaseModel):
-    # "none" | "bearer" | "oauth2_client_credentials"
-    type: str = "none"
-    bearerToken: Optional[str] = None
-    oauth2: Optional[OAuth2ClientCredentials] = None
-
-
-class RunRequest(BaseModel):
-    endpointUrl: str
-    method: str = Field(default="POST")
-    headers: Dict[str, str] = Field(default_factory=dict)
-
-    payloadText: str
-    payloadType: Optional[str] = None
-    csvSendMode: str = "csv_as_json"
-    includeContainers: bool = True
-
-    protectedPaths: List[str] = Field(default_factory=list)
-    timeoutSeconds: int = 25
-    missingRequiredRegex: str = DEFAULT_MISSING_REQUIRED_REGEX
-    contentTypeOverride: Optional[str] = None
-    notes: str = ""
-
-    # NEW: auth config (NOT persisted)
-    auth: Optional[AuthConfig] = None
-
-
-class RunCreateResponse(BaseModel):
-    runId: int
-
-
-class RunMeta(BaseModel):
-    id: int
-    created_at_utc: str
-    endpoint: str
-    method: str
-    payload_type: str
-    payload_hash: str
-    notes: str
-
-
-class RunDetail(BaseModel):
-    run: Dict[str, Any]
-    results: List[Dict[str, Any]]
-
-
-# ----------------------------
-# Helpers
-# ----------------------------
-def _strip_auth_from_headers(headers: Dict[str, str]) -> Dict[str, str]:
-    """
-    Prevent accidental persistence of secrets if user puts Authorization in headers box.
-    """
-    cleaned: Dict[str, str] = {}
-    for k, v in (headers or {}).items():
-        if k.lower() == "authorization":
-            continue
-        cleaned[k] = v
-    return cleaned
-
-
-# ----------------------------
-# Routes
-# ----------------------------
-@app.get("/api/health")
-def health():
-    return {"ok": True}
+def discover_fields_from_json(obj: Any, prefix: str = "") -> List[str]:
+    fields: List[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{prefix}.{k}" if prefix else k
+            fields.append(p)
+            fields.extend(discover_fields_from_json(v, p))
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            p = f"{prefix}[{i}]"
+            fields.extend(discover_fields_from_json(item, p))
+    return fields
 
 
 @app.post("/api/parse", response_model=ParseResponse)
-def parse(req: ParseRequest):
-    payload_text = req.payloadText or ""
-    ptype = req.payloadType or detect_payload_type(payload_text)
+async def parse_endpoint(req: ParseRequest) -> ParseResponse:
+    # NOTE: auth is accepted for forward-compat or if you later want parse to call target APIs.
+    # This parse implementation only analyzes the payload text.
 
-    if ptype == "unknown":
-        raise HTTPException(
-            status_code=400,
-            detail="Could not detect payload type (provide valid JSON/XML/CSV).",
-        )
+    pt = req.payloadType
+    text = req.payloadText or ""
 
-    parsed, raw_csv = parse_payload(payload_text, ptype, req.csvSendMode)
+    if pt == "json":
+        import json
 
-    if ptype == "json":
-        paths = extract_paths_json(parsed, include_containers=req.includeContainers)
-    elif ptype == "xml":
-        paths = extract_paths_xml(parsed, include_containers=req.includeContainers)
-    elif ptype == "csv":
-        paths = extract_paths_csv(parsed, raw_csv, req.csvSendMode)
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported payloadType={ptype}")
-
-    return ParseResponse(detectedType=ptype, paths=paths)
-
-
-@app.post("/api/runs", response_model=RunCreateResponse)
-def create_run(req: RunRequest):
-    payload_text = req.payloadText or ""
-    ptype = req.payloadType or detect_payload_type(payload_text)
-
-    if ptype == "unknown":
-        raise HTTPException(
-            status_code=400,
-            detail="Could not detect payload type (provide valid JSON/XML/CSV).",
-        )
-
-    parsed, raw_csv = parse_payload(payload_text, ptype, req.csvSendMode)
-
-    # discover paths
-    if ptype == "json":
-        all_paths = extract_paths_json(parsed, include_containers=req.includeContainers)
-    elif ptype == "xml":
-        all_paths = extract_paths_xml(parsed, include_containers=req.includeContainers)
-    elif ptype == "csv":
-        all_paths = extract_paths_csv(parsed, raw_csv, req.csvSendMode)
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported payloadType={ptype}")
-
-    protected = set(req.protectedPaths or [])
-    targets = [p for p in all_paths if p not in protected]
-
-    # Build auth headers ONCE per run (not per omitted field)
-    try:
-        auth_headers = build_auth_headers(req.auth.dict() if req.auth else None)
-    except AuthError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    # Merge outbound headers: user headers + auth headers (auth wins)
-    outbound_headers = dict(req.headers or {})
-    outbound_headers.update(auth_headers)
-
-    # Persist headers WITHOUT Authorization to avoid storing secrets
-    persisted_headers = _strip_auth_from_headers(req.headers or {})
-
-    # store run metadata (auth is not persisted)
-    run_id = insert_run(
-        conn,
-        endpoint=req.endpointUrl.strip(),
-        method=req.method.strip().upper(),
-        payload_type=ptype,
-        payload_hash=sha256_text(payload_text),
-        headers=persisted_headers,
-        protected_paths=sorted(list(protected)),
-        tested_paths=targets,
-        include_containers=req.includeContainers,
-        missing_required_regex=req.missingRequiredRegex or DEFAULT_MISSING_REQUIRED_REGEX,
-        force_content_type=req.contentTypeOverride,
-        csv_send_mode=req.csvSendMode if ptype == "csv" else None,
-        notes=req.notes or "",
-    )
-
-    # execute
-    results: List[Dict[str, Any]] = []
-    for path in targets:
         try:
-            r = run_omit_one(
-                endpoint=req.endpointUrl.strip(),
-                method=req.method.strip().upper(),
-                headers=outbound_headers,
-                payload_type=ptype,
-                base_obj=parsed,
-                raw_csv=raw_csv,
-                omit_path=path,
-                timeout_s=int(req.timeoutSeconds),
-                missing_required_regex=req.missingRequiredRegex
-                or DEFAULT_MISSING_REQUIRED_REGEX,
-                csv_send_mode=req.csvSendMode,
-                force_content_type=req.contentTypeOverride,
-            )
+            obj = json.loads(text) if text.strip() else {}
         except Exception as e:
-            r = {
-                "omitted_path": path,
-                "removed": False,
-                "status_code": 0,
-                "classification": "CLIENT_ERROR",
-                "why": f"Request exception: {e}",
-                "response_snippet": "",
-                "elapsed_ms": 0,
-            }
-        results.append(r)
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
-    insert_results(conn, run_id, results)
-    return RunCreateResponse(runId=run_id)
+        fields = sorted(set(discover_fields_from_json(obj)))
+        return ParseResponse(fields=fields)
+
+    if pt == "xml":
+        # Minimal XML field discovery: tag paths
+        import xml.etree.ElementTree as ET
+
+        try:
+            root = ET.fromstring(text)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid XML: {e}")
+
+        fields: List[str] = []
+
+        def walk(node: ET.Element, prefix: str = ""):
+            path = f"{prefix}/{node.tag}" if prefix else node.tag
+            fields.append(path)
+            for child in list(node):
+                walk(child, path)
+
+        walk(root)
+        return ParseResponse(fields=sorted(set(fields)))
+
+    if pt == "csv":
+        # Minimal CSV field discovery: header row only
+        lines = [ln for ln in text.splitlines() if ln.strip() != ""]
+        if not lines:
+            return ParseResponse(fields=[])
+
+        header = lines[0]
+        # very simple split - if you need robust CSV parsing, use csv module
+        cols = [c.strip() for c in header.split(",")]
+        return ParseResponse(fields=[c for c in cols if c])
+
+    raise HTTPException(status_code=400, detail=f"Unsupported payloadType: {pt}")
 
 
-@app.get("/api/runs")
-def runs():
-    rows = list_runs(conn, limit=200)
-    out = []
-    for r in rows:
-        # r might be dict already (your db.py returns dict rows)
-        created = r.get("created_at_utc") or r.get("created_at") or r.get("createdAtUtc") or r.get("createdAt")
-        out.append({
-            "id": r.get("id"),
-            "created_at_utc": created,
-            "endpoint": r.get("endpoint"),
-            "method": r.get("method"),
-            "payload_type": r.get("payload_type") or r.get("payloadType"),
-            "payload_hash": r.get("payload_hash") or r.get("payloadHash"),
-            "notes": r.get("notes") or "",
-        })
-    return out
+@app.get("/api/runs", response_model=List[RunMeta])
+async def list_runs():
+    # newest first
+    items = list(RUNS.values())
+    items.sort(key=lambda r: r.createdAt, reverse=True)
+    return [RunMeta(id=r.id, createdAt=r.createdAt, status=r.status) for r in items]
 
 
 @app.get("/api/runs/{run_id}", response_model=RunDetail)
-def run_detail(run_id: int):
-    r = get_run(conn, run_id)
+async def get_run(run_id: str):
+    r = RUNS.get(run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
-    res = get_results(conn, run_id)
-    return {"run": r, "results": res}
+    return r
 
 
-@app.get("/api/runs/{run_id}/export.json")
-def export_json(run_id: int):
-    r = get_run(conn, run_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Run not found")
-    res = get_results(conn, run_id)
-    return {"run": r, "results": res}
+@app.post("/api/runs", response_model=CreateRunResponse)
+async def create_run(req: CreateRunRequest):
+    run_id = str(uuid.uuid4())
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
-
-@app.get("/api/runs/{run_id}/export.csv")
-def export_csv(run_id: int):
-    import csv
-    from io import StringIO
-
-    from fastapi.responses import Response
-
-    r = get_run(conn, run_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Run not found")
-    res = get_results(conn, run_id)
-
-    buf = StringIO()
-    w = csv.DictWriter(
-        buf,
-        fieldnames=[
-            "omitted_path",
-            "removed",
-            "status_code",
-            "classification",
-            "why",
-            "response_snippet",
-            "elapsed_ms",
-        ],
+    RUNS[run_id] = RunDetail(
+        id=run_id,
+        createdAt=created_at,
+        status="running",
+        results=None,
+        error=None,
     )
-    w.writeheader()
-    for row in res:
-        w.writerow(row)
 
-    return Response(content=buf.getvalue(), media_type="text/csv")
+    # Build outbound request
+    headers: Dict[str, str] = {}
+    headers = apply_auth(headers, req.auth)
+
+    # Body handling
+    json_body = None
+    data_body = None
+
+    if req.payloadText and req.payloadType == "json":
+        import json
+
+        try:
+            json_body = json.loads(req.payloadText)
+        except Exception as e:
+            RUNS[run_id].status = "error"
+            RUNS[run_id].error = {"message": f"Invalid JSON payload: {e}"}
+            return CreateRunResponse(id=run_id)
+
+    elif req.payloadText and req.payloadType in ("xml", "csv"):
+        # send raw text
+        data_body = req.payloadText.encode("utf-8")
+        if req.payloadType == "xml":
+          headers.setdefault("Content-Type", "application/xml")
+        if req.payloadType == "csv":
+          headers.setdefault("Content-Type", "text/csv")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request(
+                req.method,
+                req.targetUrl,
+                headers=headers,
+                json=json_body,
+                content=data_body,
+            )
+
+        # Store minimal response info (expand as needed)
+        RUNS[run_id].status = "done"
+        RUNS[run_id].results = {
+            "http": {
+                "status": resp.status_code,
+                "headers": dict(resp.headers),
+                "bodyPreview": resp.text[:2000] if resp.text else "",
+            },
+            "protectedFields": req.protectedFields or [],
+        }
+
+    except Exception as e:
+        RUNS[run_id].status = "error"
+        RUNS[run_id].error = {"message": str(e)}
+
+    return CreateRunResponse(id=run_id)
