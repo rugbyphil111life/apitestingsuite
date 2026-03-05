@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, HttpUrl, Field
 
-from app.schemas.auth import AuthConfig
+from backend.app.schemas.auth import AuthConfig
 
 
 class RunExecuteRequest(BaseModel):
