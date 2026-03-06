@@ -2,7 +2,7 @@
 import base64
 from typing import Dict, Optional
 
-from .schemas import AuthConfig
+from backend.app.schemas.auth import AuthConfig
 
 def apply_auth(headers: Dict[str, str], auth: Optional[AuthConfig]) -> Dict[str, str]:
     """
