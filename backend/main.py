@@ -1,5 +1,5 @@
 # app/main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import time
 import uuid
@@ -41,7 +41,7 @@ def discover_fields_from_json(obj: Any, prefix: str = "") -> List[str]:
 
 
 @app.post("/api/parse")
-async def parse_endpoint(req):
+async def parse_endpoint(req: dict = Body(...)):
     # NOTE: auth is accepted for forward-compat or if you later want parse to call target APIs.
     # This parse implementation only analyzes the payload text.
 
