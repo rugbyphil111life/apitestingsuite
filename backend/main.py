@@ -41,7 +41,7 @@ def discover_fields_from_json(obj: Any, prefix: str = "") -> List[str]:
 
 
 @app.post("/api/parse")
-async def parse_endpoint(req: ParseRequest) -> ParseResponse:
+async def parse_endpoint(req):
     # NOTE: auth is accepted for forward-compat or if you later want parse to call target APIs.
     # This parse implementation only analyzes the payload text.
 
