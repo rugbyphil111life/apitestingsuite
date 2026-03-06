@@ -93,7 +93,7 @@ async def parse_endpoint(req):
     raise HTTPException(status_code=400, detail=f"Unsupported payloadType: {pt}")
 
 
-@app.get("/api/runs", response_model=List[RunMeta])
+@app.get("/api/runs")
 async def list_runs():
     # newest first
     items = list(RUNS.values())
@@ -101,7 +101,7 @@ async def list_runs():
     return [RunMeta(id=r.id, createdAt=r.createdAt, status=r.status) for r in items]
 
 
-@app.get("/api/runs/{run_id}", response_model=RunDetail)
+@app.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
     r = RUNS.get(run_id)
     if not r:
@@ -109,7 +109,7 @@ async def get_run(run_id: str):
     return r
 
 
-@app.post("/api/runs", response_model=CreateRunResponse)
+@app.post("/api/runs")
 async def create_run(req: CreateRunRequest):
     run_id = str(uuid.uuid4())
     created_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
