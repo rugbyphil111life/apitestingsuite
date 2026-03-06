@@ -45,8 +45,8 @@ async def parse_endpoint(req: dict = Body(...)):
     # NOTE: auth is accepted for forward-compat or if you later want parse to call target APIs.
     # This parse implementation only analyzes the payload text.
 
-    pt = req.payloadType
-    text = req.payloadText or ""
+    pt = req.get("payloadType")
+    text = req.get("payloadText", "")    
 
     if pt == "json":
         import json
