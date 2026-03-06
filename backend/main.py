@@ -110,7 +110,7 @@ async def get_run(run_id: str):
 
 
 @app.post("/api/runs")
-async def create_run(req: CreateRunRequest):
+async def create_run(req: RunExecuteRequest):
     run_id = str(uuid.uuid4())
     created_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
