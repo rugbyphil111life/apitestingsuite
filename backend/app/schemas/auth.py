@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, HttpUrl
 
 
-AuthType = Literal["none", "bearer", "oauth2_client_credentials"]
+AuthType = Literal["none", "basic", "bearer", "oauth2_client_credentials"]
 
 
 class OAuth2ClientCredentials(BaseModel):
@@ -17,6 +17,10 @@ class OAuth2ClientCredentials(BaseModel):
 
 class AuthConfig(BaseModel):
     type: AuthType = "none"
+
+    # basic
+    username: Optional[str] = None
+    password: Optional[str] = None
 
     # bearer
     bearerToken: Optional[str] = None
