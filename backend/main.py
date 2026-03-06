@@ -23,7 +23,7 @@ app.add_middleware(
 )
 
 # In-memory store (drop-in). Replace with your persistence if needed.
-RUNS: Dict[str, RunDetail] = {}
+RUNS: Dict[str, dict] = {}
 
 
 def discover_fields_from_json(obj: Any, prefix: str = "") -> List[str]:
