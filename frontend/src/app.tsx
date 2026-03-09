@@ -243,7 +243,7 @@ export default function App() {
 
               <FieldPicker
                 fields={discoveredFields}
-                selected={protectedFields}
+                protectedPaths={protectedFields}
                 onChange={setProtectedFields}
               />
 
