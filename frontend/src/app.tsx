@@ -242,7 +242,7 @@ export default function App() {
               </div>
 
               <FieldPicker
-                fields={discoveredFields}
+                paths={discoveredFields}
                 protectedPaths={protectedFields}
                 onChange={setProtectedFields}
               />
