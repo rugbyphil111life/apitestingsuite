@@ -17,7 +17,10 @@ app = FastAPI()
 # CORS - keep permissive for dev; tighten for prod
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://apitestingsuite.onrender.com",
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
