@@ -61,7 +61,7 @@ async def parse_endpoint(req: dict = Body(...)):
             raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
         fields = sorted(set(discover_fields_from_json(obj)))
-        return ParseResponse(fields=fields)
+        return {"fields": fields}
 
     if pt == "xml":
         # Minimal XML field discovery: tag paths
